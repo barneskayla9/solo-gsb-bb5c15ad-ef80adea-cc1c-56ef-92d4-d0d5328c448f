@@ -6,6 +6,8 @@ POST /duplicate-passages 重复口播片段检测、POST /redact-preview 敏感�
 重新对齐逐词时间、POST /qa-pairs 访谈问答可回听索引、POST /gain-plan
 响度增益规划服务。"""
 
+import math
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -80,6 +82,24 @@ def _error_response(code: str, message: str, extra: dict | None = None):
     return JSONResponse(status_code=422, content={"error": detail})
 
 
+def _json_safe(value):
+    """递归把错误详情中的非有限浮点数（NaN/Infinity/-Infinity）替换为
+    对应字符串，其余内容原样保留。请求体可携带这些非标准 JSON 字面量，
+    它们会随校验错误的 input 字段进入错误详情；JSONResponse 序列化时
+    allow_nan=False，不替换会抛 ValueError 导致无法返回约定的 422。"""
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "NaN"
+        if math.isinf(value):
+            return "Infinity" if value > 0 else "-Infinity"
+        return value
+    if isinstance(value, dict):
+        return {key: _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 @app.exception_handler(DomainError)
 async def domain_error_handler(_: Request, exc: DomainError):
     return _error_response(exc.code, exc.message, exc.extra)
@@ -107,7 +127,7 @@ async def validation_exception_handler(_: Request, exc: RequestValidationError):
         "（每项含非负整数 start_ms/end_ms 且 start_ms < end_ms、"
         "-80～0 的整数 loudness_lufs/true_peak_dbfs）、"
         "-40～0 的整数 target_lufs、0～12 的整数 max_step_db",
-        {"errors": exc.errors()},
+        {"errors": _json_safe(exc.errors())},
     )
 
 

@@ -81,6 +81,63 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 422)
         self.assertEqual(resp.json()["error"]["code"], "invalid_request")
 
+    def test_non_finite_float_in_body_returns_422(self):
+        # 请求体含 NaN/Infinity/-Infinity（Python json 解析接受的非标准字面量）时，
+        # 错误详情中的非有限浮点数须替换为对应字符串，保证返回约定的 422
+        for literal, text in (
+            ("NaN", "NaN"),
+            ("Infinity", "Infinity"),
+            ("-Infinity", "-Infinity"),
+        ):
+            resp = self.client.post(
+                "/segments",
+                content=f'{{"words": {literal}}}',
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(resp.status_code, 422, literal)
+            err = resp.json()["error"]
+            self.assertEqual(err["code"], "invalid_request")
+            detail = err["errors"][0]
+            self.assertEqual(detail["input"], text)
+            self.assertEqual(detail["loc"], ["body", "words"])
+            self.assertIn("type", detail)
+            self.assertIn("msg", detail)
+
+    def test_non_finite_float_in_nested_word_field_returns_422(self):
+        # 嵌套词字段中的非有限浮点数同样替换为字符串
+        resp = self.client.post(
+            "/segments",
+            content='{"words": [{"start_ms": NaN, "end_ms": 100,'
+            ' "text": "a", "speaker": "A"}]}',
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(resp.status_code, 422)
+        err = resp.json()["error"]
+        self.assertEqual(err["code"], "invalid_request")
+        detail = err["errors"][0]
+        self.assertEqual(detail["loc"], ["body", "words", 0, "start_ms"])
+        self.assertEqual(detail["input"], "NaN")
+        self.assertIn("type", detail)
+        self.assertIn("msg", detail)
+
+        # 缺失字段的错误回显整个词对象，其中的非有限浮点数也须递归替换
+        resp = self.client.post(
+            "/segments",
+            content='{"words": [{"start_ms": -Infinity}]}',
+            headers={"Content-Type": "application/json"},
+        )
+        self.assertEqual(resp.status_code, 422)
+        err = resp.json()["error"]
+        self.assertEqual(err["code"], "invalid_request")
+        by_loc = {tuple(e["loc"]): e for e in err["errors"]}
+        self.assertEqual(
+            by_loc[("body", "words", 0, "start_ms")]["input"], "-Infinity"
+        )
+        self.assertEqual(
+            by_loc[("body", "words", 0, "end_ms")]["input"],
+            {"start_ms": "-Infinity"},
+        )
+
 
 @unittest.skipUnless(_HAS_DEPS, "fastapi/httpx 未安装，跳过接口层测试")
 class AdBreakApiTests(unittest.TestCase):
