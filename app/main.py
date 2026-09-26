@@ -6,6 +6,8 @@ POST /duplicate-passages 重复口播片段检测、POST /redact-preview 敏感�
 重新对齐逐词时间、POST /qa-pairs 访谈问答可回听索引、POST /gain-plan
 响度增益规划服务。"""
 
+import math
+
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -80,6 +82,28 @@ def _error_response(code: str, message: str, extra: dict | None = None):
     return JSONResponse(status_code=422, content={"error": detail})
 
 
+def _sanitize_non_finite(value):
+    """递归把非有限浮点数替换为 JSON 可序列化的占位字符串。
+
+    JSON 请求体含 NaN/Infinity/-Infinity 时，Pydantic 会把原始浮点值
+    保留在校验错误详情（如 input）中；Starlette 的 JSONResponse 按
+    allow_nan=False 序列化会抛 ValueError，导致客户端拿不到约定的 422。
+    这里把它们替换为对应的 “NaN”/“Infinity”/“-Infinity” 字符串，
+    其余内容（type/loc/msg 等）原样保留。
+    """
+    if isinstance(value, float):
+        if math.isnan(value):
+            return "NaN"
+        if math.isinf(value):
+            return "Infinity" if value > 0 else "-Infinity"
+        return value
+    if isinstance(value, dict):
+        return {key: _sanitize_non_finite(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_sanitize_non_finite(item) for item in value]
+    return value
+
+
 @app.exception_handler(DomainError)
 async def domain_error_handler(_: Request, exc: DomainError):
     return _error_response(exc.code, exc.message, exc.extra)
@@ -107,7 +131,7 @@ async def validation_exception_handler(_: Request, exc: RequestValidationError):
         "（每项含非负整数 start_ms/end_ms 且 start_ms < end_ms、"
         "-80～0 的整数 loudness_lufs/true_peak_dbfs）、"
         "-40～0 的整数 target_lufs、0～12 的整数 max_step_db",
-        {"errors": exc.errors()},
+        {"errors": _sanitize_non_finite(exc.errors())},
     )
 
 

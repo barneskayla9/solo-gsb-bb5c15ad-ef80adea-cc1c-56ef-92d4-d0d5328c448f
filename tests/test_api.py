@@ -81,6 +81,52 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(resp.status_code, 422)
         self.assertEqual(resp.json()["error"]["code"], "invalid_request")
 
+    def test_non_finite_top_level_value_returns_422(self):
+        # 请求体含 NaN/Infinity/-Infinity（如 {"words": NaN}）时，校验错误
+        # 详情中的非有限浮点必须替换为占位字符串，统一处理器才能正常序列化：
+        # 修复前 JSONResponse 抛 ValueError，客户端收到 500 而非约定的 422。
+        for token in ("NaN", "Infinity", "-Infinity"):
+            resp = self.client.post(
+                "/segments",
+                content=b'{"words": ' + token.encode() + b"}",
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(resp.status_code, 422, token)
+            body = resp.json()
+            self.assertEqual(body["error"]["code"], "invalid_request", token)
+            errors = body["error"]["errors"]
+            self.assertEqual(len(errors), 1, token)
+            err = errors[0]
+            # type/loc/msg 原样保留，非有限浮点 input 变为对应字符串
+            self.assertEqual(err["type"], "list_type", token)
+            self.assertEqual(err["loc"], ["body", "words"], token)
+            self.assertEqual(err["msg"], "Input should be a valid list", token)
+            self.assertEqual(err["input"], token, token)
+
+    def test_non_finite_nested_word_field_returns_422(self):
+        # 嵌套词字段出现非有限数（words[i].start_ms 为 NaN/Infinity/-Infinity）
+        # 同样要返回可解析的 422，错误详情中的非法浮点被字符串化。
+        for token in ("NaN", "Infinity", "-Infinity"):
+            body = (
+                b'{"words": [{"start_ms": ' + token.encode() + b', "end_ms": 2000, '
+                b'"text": "\xe7\x94\xb2", "speaker": "A"}]}'
+            )
+            resp = self.client.post(
+                "/segments",
+                content=body,
+                headers={"Content-Type": "application/json"},
+            )
+            self.assertEqual(resp.status_code, 422, token)
+            body_json = resp.json()
+            self.assertEqual(body_json["error"]["code"], "invalid_request", token)
+            errors = body_json["error"]["errors"]
+            self.assertEqual(len(errors), 1, token)
+            err = errors[0]
+            self.assertEqual(err["type"], "finite_number", token)
+            self.assertEqual(err["loc"], ["body", "words", 0, "start_ms"], token)
+            self.assertEqual(err["msg"], "Input should be a finite number", token)
+            self.assertEqual(err["input"], token, token)
+
 
 @unittest.skipUnless(_HAS_DEPS, "fastapi/httpx 未安装，跳过接口层测试")
 class AdBreakApiTests(unittest.TestCase):
